@@ -1,0 +1,45 @@
+{
+  "dqn": {
+    "model": "DQN",
+    "accuracy": 0.1,
+    "f1_score": 0.03333333333333333,
+    "training_time": 0.1226344108581543,
+    "epochs": 2,
+    "updates_per_epoch": 3,
+    "total_updates": 6,
+    "train_samples": 60,
+    "test_samples": 20,
+    "batch_size": 20,
+    "losses": [
+      0.03725070723642906,
+      0.018203561504681904
+    ]
+  },
+  "qdqn": {
+    "model": "QDQN",
+    "accuracy": 0.15,
+    "f1_score": 0.03913043478260869,
+    "training_time": 380.37764263153076,
+    "epochs": 2,
+    "updates_per_epoch": 3,
+    "total_updates": 6,
+    "train_samples": 60,
+    "test_samples": 20,
+    "batch_size": 20,
+    "quantum_jobs": 7,
+    "n_qubits": 4,
+    "shots": 256,
+    "losses": [
+      0.10782677680253983,
+      0.10465414077043533
+    ]
+  },
+  "comparison_protocol": {
+    "fair_comparison": true,
+    "random_seed": 42,
+    "same_training_data": true,
+    "same_test_data": true,
+    "same_epochs": true,
+    "same_updates_per_epoch": true
+  }
+}
