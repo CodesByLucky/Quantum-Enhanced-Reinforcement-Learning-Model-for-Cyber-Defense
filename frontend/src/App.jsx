@@ -27,8 +27,8 @@ const quantumJobs = [
 ]
 
 const results = [
-  { metric: 'Accuracy', dqn: '10.0%', qdqn: '15.0%', diff: '+50%', positive: true, desc: 'Correctly classified samples out of 20 test samples' },
-  { metric: 'F1 Score', dqn: '0.033', qdqn: '0.039', diff: '+18%', positive: true, desc: 'Weighted F1 across 8 threat classes' },
+  { metric: 'Accuracy', dqn: '10.0%', qdqn: '15.0%', diff: '+1 sample', positive: false, desc: '2 vs 3 correct out of 20 test samples; random guessing is 12.5%, so this difference is not significant' },
+  { metric: 'F1 Score', dqn: '0.033', qdqn: '0.039', diff: '~Same', positive: false, desc: 'Weighted F1 across 8 threat classes; both models are near chance at this sample size' },
   { metric: 'Training Time', dqn: '0.12s', qdqn: '380s', diff: '~3000x', positive: false, desc: 'Time to complete training' },
   { metric: 'Epochs', dqn: '2', qdqn: '2', diff: 'Same', positive: false, desc: 'Complete passes through training data' },
   { metric: 'Updates', dqn: '6', qdqn: '6', diff: 'Same', positive: false, desc: 'Total gradient updates' },
@@ -63,7 +63,7 @@ export default function App() {
         {/* Stats Grid */}
         <section style={{ marginBottom: 48 }}>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16 }}>
-            <StatCard label="QDQN Accuracy" value="15.0%" sub="+50% vs Classical" color="var(--accent-blue)" />
+            <StatCard label="QDQN Accuracy" value="15.0%" sub="3 of 20 correct (chance: 12.5%)" color="var(--accent-blue)" />
             <StatCard label="DQN Accuracy" value="10.0%" sub="Baseline model" color="var(--accent-purple)" />
             <StatCard label="Quantum Jobs" value="7" sub="IBM ibm_fez" color="var(--accent-cyan)" />
             <StatCard label="Total Runtime" value="6.3 min" sub="Under 10 min budget" color="var(--accent-green)" />
