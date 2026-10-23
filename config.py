@@ -1,7 +1,12 @@
 """
 IBM Quantum Configuration Utility.
-Sets up credentials for IBM Quantum Runtime access.
+Saves credentials for IBM Quantum Runtime access (only needed for --real-hardware).
+
+Reads IBM_QUANTUM_TOKEN / IBM_QUANTUM_INSTANCE from the environment if set,
+otherwise prompts for them.
 """
+import os
+
 from qiskit_ibm_runtime import QiskitRuntimeService
 
 
@@ -13,12 +18,14 @@ def setup_credentials(token: str = None, instance: str = None):
         token: IBM Quantum API token
         instance: Instance CRN (for IBM Cloud)
     """
-    if token is None:
+    token = token or os.getenv("IBM_QUANTUM_TOKEN")
+    instance = instance or os.getenv("IBM_QUANTUM_INSTANCE")
+
+    if not token:
         token = input("Enter your IBM Quantum API token: ").strip()
-    
-    if instance is None:
-        instance = input("Enter your Instance CRN (or press Enter to skip): ").strip()
-        instance = instance if instance else None
+
+    if not instance:
+        instance = input("Enter your Instance CRN (or press Enter to skip): ").strip() or None
     
     try:
         QiskitRuntimeService.save_account(

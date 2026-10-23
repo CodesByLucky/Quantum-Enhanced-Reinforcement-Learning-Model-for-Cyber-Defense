@@ -1,54 +1,54 @@
 """
-Quantum Q-Network using IBM Quantum Runtime.
+Quantum Q-Network: classical encoder -> 4-qubit variational circuit -> classical head.
+
+Runs either on IBM Quantum hardware (Qiskit Runtime EstimatorV2) or on a local
+statevector simulator, which needs no IBM Quantum account.
 """
 import numpy as np
 import torch
 import torch.nn as nn
 from typing import Optional, List
 
+MAX_CIRCUITS_PER_JOB = 20  # keeps each IBM Quantum job within free-plan limits
+
 
 class QuantumQNetwork(nn.Module):
     """
-    Quantum-enhanced Q-Network using IBM Quantum hardware.
-    
+    Quantum-enhanced Q-Network.
+
     Architecture:
-        Input → Classical Preprocessing → Quantum Circuit → Classical Head → Q-values
-    
-    Optimized for:
-        - 4 qubits (fast execution)
-        - 256 shots (minimum for accuracy)
-        - Batch processing (minimize quantum jobs)
+        Input (13) -> Linear 32 -> Linear 4 -> tanh -> RealAmplitudes circuit
+        (4 qubits, 2 reps, linear entanglement) -> <Z> per qubit (4) -> Linear 16 -> Q-values (8)
+
+    The first rotation layer of the circuit encodes the 4 classical features;
+    the remaining 8 rotation angles are the quantum weights.
+
+    Note: circuit execution happens outside autograd (expectation values come
+    back as NumPy arrays), so gradients do not flow into the quantum weights or
+    the encoder; only the classical head is trained. See README, Limitations.
     """
-    
+
     def __init__(
-        self, 
-        in_dim: int, 
-        n_actions: int, 
+        self,
+        in_dim: int,
+        n_actions: int,
         n_qubits: int = 4,
         shots: int = 256,
         use_real_hardware: bool = True,
         backend_name: Optional[str] = None
     ):
         super().__init__()
-        
-        # Import Qiskit modules
+
         try:
-            from qiskit import QuantumCircuit
             from qiskit.circuit.library import RealAmplitudes
-            from qiskit_ibm_runtime import QiskitRuntimeService, EstimatorV2
-            from qiskit.quantum_info import SparsePauliOp
-            from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
         except ImportError as e:
-            raise RuntimeError(
-                "Install required packages:\n"
-                "pip install qiskit qiskit-ibm-runtime"
-            ) from e
-        
+            raise RuntimeError("Install required packages: pip install -r requirements.txt") from e
+
         self.n_qubits = n_qubits
         self.shots = shots
         self.n_actions = n_actions
         self.use_real_hardware = use_real_hardware
-        
+
         # Classical preprocessing: map input to qubit-sized features
         self.preprocessing = nn.Sequential(
             nn.Linear(in_dim, 32),
@@ -56,129 +56,102 @@ class QuantumQNetwork(nn.Module):
             nn.Linear(32, n_qubits),
             nn.Tanh()  # Bound to [-1, 1] for rotation angles
         )
-        
-        # Initialize IBM Quantum service
-        self.service = QiskitRuntimeService()
-        
-        # Select backend
+
+        # Parameterized quantum circuit
+        self.qc = RealAmplitudes(
+            num_qubits=n_qubits,
+            reps=2,
+            entanglement='linear',
+            insert_barriers=True
+        )
+        observables = self._create_observables(n_qubits)
+
         if use_real_hardware:
+            from qiskit_ibm_runtime import QiskitRuntimeService
+            from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
+
+            self.service = QiskitRuntimeService()
             if backend_name:
                 self.backend = self.service.backend(backend_name)
             else:
                 self.backend = self.service.least_busy(operational=True, simulator=False)
             print(f"Using quantum backend: {self.backend.name}")
+
+            # Transpile once for the backend, then map the observables onto the
+            # physical qubits the circuit was laid out on.
+            pm = generate_preset_pass_manager(backend=self.backend, optimization_level=2)
+            self.transpiled_qc = pm.run(self.qc)
+            self.observables = [obs.apply_layout(self.transpiled_qc.layout) for obs in observables]
+            self.estimator = None  # a Runtime estimator is created per job
         else:
-            # Use simulator
-            backends = self.service.backends(simulator=True)
-            self.backend = backends[0] if backends else None
-            print(f"Using simulator: {self.backend.name if self.backend else 'local'}")
-        
-        # Create parameterized quantum circuit
-        self.qc = RealAmplitudes(
-            num_qubits=n_qubits,
-            reps=2,  # 2 repetitions for good expressiveness
-            entanglement='linear',
-            insert_barriers=True
-        )
-        
-        # Create observables (Z measurement on each qubit)
-        self.observables = self._create_observables()
-        
-        # Transpile circuit for backend
-        self.pm = generate_preset_pass_manager(backend=self.backend, optimization_level=2)
-        self.transpiled_qc = self.pm.run(self.qc)
-        
-        # Handle potential qubit count change after transpilation
-        transpiled_n_qubits = self.transpiled_qc.num_qubits
-        if transpiled_n_qubits != n_qubits:
-            print(f"Note: Circuit expanded to {transpiled_n_qubits} qubits after transpilation")
-            self.observables = self._create_observables(transpiled_n_qubits)
-        
-        # Store parameter info
+            from qiskit.primitives import StatevectorEstimator
+
+            self.backend = None
+            self.transpiled_qc = self.qc
+            self.observables = observables
+            self.estimator = StatevectorEstimator()
+            print("Using local statevector simulator (no IBM Quantum account needed)")
+
+        # Parameter split: first layer encodes inputs, the rest are trainable weights
         self.input_params = list(self.qc.parameters[:n_qubits])
         self.weight_params = list(self.qc.parameters[n_qubits:])
-        
-        # Trainable quantum weights
-        n_weights = len(self.weight_params)
-        self.quantum_weights = nn.Parameter(torch.randn(n_weights) * 0.1)
-        
-        # Classical head: map quantum outputs to Q-values
-        n_obs = len(self.observables)
+        self.quantum_weights = nn.Parameter(torch.randn(len(self.weight_params)) * 0.1)
+
+        # Classical head: one expectation value per logical qubit -> Q-values
         self.head = nn.Sequential(
-            nn.Linear(n_obs, 16),
+            nn.Linear(len(self.observables), 16),
             nn.ReLU(),
             nn.Linear(16, n_actions)
         )
-        
-        # Job counter for tracking
+
         self.quantum_jobs_count = 0
-    
-    def _create_observables(self, n_qubits: int = None) -> List:
-        """Create Pauli-Z observables for each qubit."""
+
+    @staticmethod
+    def _create_observables(n_qubits: int) -> List:
+        """Pauli-Z observable on each qubit."""
         from qiskit.quantum_info import SparsePauliOp
-        
-        n = n_qubits or self.n_qubits
-        observables = []
-        
-        # Z measurement on each qubit
-        for i in range(n):
-            pauli_str = 'I' * i + 'Z' + 'I' * (n - i - 1)
-            observables.append(SparsePauliOp.from_list([(pauli_str, 1.0)]))
-        
-        return observables
-    
+
+        return [
+            SparsePauliOp.from_list([('I' * i + 'Z' + 'I' * (n_qubits - i - 1), 1.0)])
+            for i in range(n_qubits)
+        ]
+
+    def _run_estimator(self, pubs):
+        if self.use_real_hardware:
+            from qiskit_ibm_runtime import EstimatorV2
+
+            estimator = EstimatorV2(mode=self.backend)
+            estimator.options.default_shots = self.shots
+        else:
+            estimator = self.estimator
+        return estimator.run(pubs).result()
+
     def _execute_quantum(self, input_data: torch.Tensor) -> torch.Tensor:
-        """Execute quantum circuit on IBM Quantum hardware."""
-        from qiskit_ibm_runtime import EstimatorV2
-        
-        batch_size = input_data.shape[0]
+        """Return <Z> for each qubit, for every sample in the batch."""
         input_np = input_data.detach().cpu().numpy()
         weights_np = self.quantum_weights.detach().cpu().numpy()
-        
-        # Process in sub-batches to avoid IBM Quantum limits
-        MAX_CIRCUITS_PER_JOB = 20  # Free plan limit
         all_results = []
-        
-        for start_idx in range(0, batch_size, MAX_CIRCUITS_PER_JOB):
-            end_idx = min(start_idx + MAX_CIRCUITS_PER_JOB, batch_size)
-            sub_batch = input_np[start_idx:end_idx]
-            
-            # Create estimator for this sub-batch
-            estimator = EstimatorV2(mode=self.backend)
-            
-            # Build PUBs for this sub-batch
-            pubs = []
-            for inp in sub_batch:
-                params = np.concatenate([inp, weights_np])
-                pubs.append((self.transpiled_qc, self.observables, params))
-            
-            # Execute on quantum hardware
-            job = estimator.run(pubs=pubs)
+
+        # Sub-batches keep each hardware job within free-plan circuit limits
+        for start in range(0, len(input_np), MAX_CIRCUITS_PER_JOB):
+            sub_batch = input_np[start:start + MAX_CIRCUITS_PER_JOB]
+            pubs = [
+                (self.transpiled_qc, self.observables, np.concatenate([inp, weights_np]))
+                for inp in sub_batch
+            ]
             self.quantum_jobs_count += 1
-            
-            print(f"  Quantum job #{self.quantum_jobs_count} submitted ({len(sub_batch)} samples)...")
-            
-            result = job.result()
-            
-            # Extract expectation values
-            for pub_result in result:
-                evs = pub_result.data.evs
-                all_results.append(evs)
-        
+            if self.use_real_hardware:
+                print(f"  Quantum job #{self.quantum_jobs_count} submitted ({len(sub_batch)} samples)...")
+            for pub_result in self._run_estimator(pubs):
+                all_results.append(pub_result.data.evs)
+
         return torch.tensor(np.array(all_results), dtype=torch.float32, device=input_data.device)
-    
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through quantum network."""
-        # Classical preprocessing
         features = self.preprocessing(x)
-        
-        # Quantum layer
         quantum_out = self._execute_quantum(features)
-        
-        # Classical head
-        q_values = self.head(quantum_out)
-        
-        return q_values
+        return self.head(quantum_out)
 
 
 class QuantumDQNAgent:
